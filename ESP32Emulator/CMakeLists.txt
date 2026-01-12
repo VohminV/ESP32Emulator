@@ -9,67 +9,53 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Найти Qt
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
 
+# Источник проекта
 set(PROJECT_SOURCES
-        main.cpp
-        mainwindow.cpp
-        mainwindow.h
-        mainwindow.ui
-		workerobject.h
-		workerobject.cpp
-		peripheralcomponent.h
-		emulatorcore.cpp
-		emulatorcore.h
+    main.cpp
+    mainwindow.cpp
+    mainwindow.h
+    mainwindow.ui
+    workerobject.h
+    workerobject.cpp
+    peripheralcomponent.h
+    emulatorcore.cpp
+    emulatorcore.h
 )
 
+# Создаем исполняемый файл
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
     qt_add_executable(ESP32Emulator
         MANUAL_FINALIZATION
         ${PROJECT_SOURCES}
     )
-# Define target properties for Android with Qt 6 as:
-#    set_property(TARGET ESP32Emulator APPEND PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR
-#                 ${CMAKE_CURRENT_SOURCE_DIR}/android)
-# For more information, see https://doc.qt.io/qt-6/qt-add-executable.html#target-creation
 else()
-    if(ANDROID)
-        add_library(ESP32Emulator SHARED
-            ${PROJECT_SOURCES}
-        )
-# Define properties for Android with Qt 5 after find_package() calls as:
-#    set(ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android")
-    else()
-        add_executable(ESP32Emulator
-            ${PROJECT_SOURCES}
-        )
-    endif()
+    add_executable(ESP32Emulator
+        ${PROJECT_SOURCES}
+    )
 endif()
 
 target_link_libraries(ESP32Emulator PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
 
-# Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
-# If you are developing for iOS or macOS you should consider setting an
-# explicit, fixed bundle identifier manually though.
-if(${QT_VERSION} VERSION_LESS 6.1.0)
-  set(BUNDLE_ID_OPTION MACOSX_BUNDLE_GUI_IDENTIFIER com.example.ESP32Emulator)
-endif()
+# Настройки для Windows/macOS
 set_target_properties(ESP32Emulator PROPERTIES
-    ${BUNDLE_ID_OPTION}
-    MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
-    MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
-    MACOSX_BUNDLE TRUE
     WIN32_EXECUTABLE TRUE
+    MACOSX_BUNDLE TRUE
 )
 
+set(FRITZING_PARTS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/fritzing-parts")
+add_custom_target(copy_fritzing_parts ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${FRITZING_PARTS_DIR}"
+            "$<TARGET_FILE_DIR:ESP32Emulator>/fritzing-parts"
+)
+add_dependencies(ESP32Emulator copy_fritzing_parts)
+
+# --- Установка (optional) ---
 include(GNUInstallDirs)
 install(TARGETS ESP32Emulator
-    BUNDLE DESTINATION .
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
-
-if(QT_VERSION_MAJOR EQUAL 6)
-    qt_finalize_executable(ESP32Emulator)
-endif()
