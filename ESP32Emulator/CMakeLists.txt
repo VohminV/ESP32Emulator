@@ -18,13 +18,13 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Svg)
 set(PROJECT_SOURCES
     main.cpp
     mainwindow.cpp
-    mainwindow.h
-    mainwindow.ui
-    workerobject.h
     workerobject.cpp
-    peripheralcomponent.h
     emulatorcore.cpp
-    emulatorcore.h
+    xtensacpu.cpp
+    memorymap.cpp
+    firmwareloader.cpp
+    peripheralcomponent.cpp
+    cpphighlighter.cpp
 )
 
 # --- Создаем исполняемый файл ---

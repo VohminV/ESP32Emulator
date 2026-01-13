@@ -13,6 +13,10 @@
 #include <QPixmap>
 #include <QSvgRenderer>
 #include <QPainter>
+#include <QFileSystemModel>
+#include <QTextEdit>
+#include <QInputDialog>
+#include <QMessageBox>
 
 #include "workerobject.h"
 #include "projecttreewidget.h"
@@ -34,6 +38,9 @@ public:
     // Загрузка компонентов Fritzing
     void loadFritzingParts();
 
+    // Инициализация вкладки Code
+    void initCodeTab(const QString &projectPath);
+
 private slots:
     void on_actionStart_triggered();
     void on_actionStop_triggered();
@@ -43,6 +50,14 @@ private slots:
     void appendLog(const QString &message);
     void onEmulationStateChanged(bool running);
 
+    // Слоты для Code tab
+    void onTreeProjectDoubleClicked(const QModelIndex &index);
+    void createNewFile();
+	void onTreeProjectContextMenu(const QPoint &pos);
+    void createNewFolder();
+	void createNewProject();
+	void setupProjectStructure(const QString &projectPath); 
+
 private:
     Ui::MainWindow *ui;
 
@@ -50,9 +65,17 @@ private:
     QThread m_workerThread;
     WorkerObject *m_workerObject;
 
+    // Модель для дерева проекта
+    QFileSystemModel *m_projectModel;
+
+    // Корневая папка проекта
+    QString m_projectRoot;
+
     // Вспомогательные функции
     QList<QFileInfo> findFzpRecursive(const QString &dirPath);
     QString findSvgFileRecursive(const QString &baseDir, const QString &fileName);
+	
+	QMap<QTextEdit*, QString> m_openedFiles;
 };
 
 #endif // MAINWINDOW_H

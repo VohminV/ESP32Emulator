@@ -59,7 +59,7 @@
     <item>
      <widget class="QTabWidget" name="tabWidget">
       <property name="currentIndex">
-       <number>0</number>
+       <number>1</number>
       </property>
       <widget class="QWidget" name="tabSchematic">
        <attribute name="title">
@@ -129,11 +129,52 @@
         </item>
        </layout>
       </widget>
-      <widget class="QWidget" name="tabCode">
-       <attribute name="title">
-        <string>Code</string>
-       </attribute>
-      </widget>
+	<widget class="QWidget" name="tabCode">
+	 <attribute name="title">
+	  <string>Code</string>
+	 </attribute>
+
+	 <layout class="QHBoxLayout" name="horizontalLayout_tabCode">
+
+	  <!-- Левая панель: QWidget с layout -->
+	  <item>
+	   <widget class="QWidget" name="projectPanel">
+		<property name="minimumSize">
+		 <size>
+		  <width>200</width>
+		  <height>0</height>
+		 </size>
+		</property>
+		<layout class="QVBoxLayout" name="projectLayout">
+
+		 <!-- Toolbar -->
+		 <item>
+		  <widget class="QToolBar" name="projectToolbar"/>
+		 </item>
+
+		 <!-- Дерево проекта -->
+		 <item>
+		  <widget class="QTreeView" name="treeProject"/>
+		 </item>
+
+		</layout>
+	   </widget>
+	  </item>
+
+	  <!-- Правая панель: редактор вкладок -->
+	  <item>
+	   <widget class="QWidget" name="editorPanel">
+		<layout class="QVBoxLayout" name="editorLayout">
+		 <item>
+		  <widget class="QTabWidget" name="tabEditor"/>
+		 </item>
+		</layout>
+	   </widget>
+	  </item>
+
+	 </layout>
+	</widget>
+
       <widget class="QWidget" name="tabMemory">
        <attribute name="title">
         <string>Memory</string>
