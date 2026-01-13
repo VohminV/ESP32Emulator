@@ -1,72 +1,110 @@
 #ifndef EMULATORCORE_H
 #define EMULATORCORE_H
 
-#include "peripheralcomponent.h"
 #include "xtensacpu.h"
 #include "memorymap.h"
-#include "firmwareloader.h"
-
-#include <vector>
+#include <string>
 #include <memory>
 #include <thread>
 #include <atomic>
-#include <chrono>
 #include <queue>
 #include <functional>
 #include <mutex>
 
-class EmulatorCore
-{
+// Forward declaration for PeripheralComponent
+class PeripheralComponent;
+
+/**
+ * @brief The main coordinator of the entire ESP32 emulation.
+ * Manages CPUs, memory, peripherals, and the global timing model.
+ */
+class EmulatorCore {
 public:
-    explicit EmulatorCore();
+    EmulatorCore();
     ~EmulatorCore();
 
-    // Загрузка прошивки (ELF или BIN)
+    /**
+     * @brief Loads a firmware binary into the emulated Flash.
+     * @param path Path to the .bin file.
+     * @return True on success, false otherwise.
+     */
     bool loadFirmware(const std::string& path);
 
-    // Управление выполнением
-    void start();   // Запускает эмуляцию в отдельном потоке
-    void stop();    // Останавливает эмуляцию
-    void step();    // Выполняет один такт CPU
+    /**
+     * @brief Starts the emulation in a separate thread.
+     */
+    void start();
 
-    // Добавление периферии
+    /**
+     * @brief Stops the emulation thread.
+     */
+    void stop();
+
+    /**
+     * @brief Executes a single emulation tick (for debugging).
+     */
+    void step();
+
+    /**
+     * @brief Adds a peripheral device to the system.
+     * @param peripheral Unique pointer to the peripheral.
+     */
     void addPeripheral(std::unique_ptr<PeripheralComponent> peripheral);
 
-    // Чтение/запись в адресное пространство SoC
+    // --- Public API for interaction ---
     uint32_t readMemory(uint32_t address);
     void writeMemory(uint32_t address, uint32_t value);
+    void executeForUs(uint64_t us);
 
-    // Тайминг
-    void tick(); // Выполняет один такт всей системы
-    void executeForUs(uint64_t us); // Выполняет указанное количество микросекунд
-	void scheduleEvent(uint64_t tick, std::function<void()> callback);
-    bool isRunning() const { return m_running.load(); }
-	uint64_t getCurrentTick() const { return m_globalTick.load(); } 
+    // --- Callbacks for peripherals ---
+    /**
+     * @brief Schedules an event to be executed at a specific global tick.
+     * @param tick The global tick count when the event should fire.
+     * @param callback The function to execute.
+     */
+    void scheduleEvent(uint64_t tick, std::function<void()> callback);
+
+    /**
+     * @brief Requests an interrupt from a peripheral.
+     * This is called by peripheral components.
+     * @param irqNumber The interrupt number to request.
+     */
+    void requestInterrupt(int irqNumber);
 	
+	void scheduleEventRelative(uint64_t ticksFromNow, std::function<void()> callback);
+	/**
+     * @brief Checks if the emulation is currently running.
+     * @return True if running, false otherwise.
+     */
+    bool isRunning() const;
+
 private:
-    void emulationLoop(); // Основной цикл эмуляции
+    // Main emulation loop
+    void tick();
     void dispatchPendingInterrupts();
 
-    // Компоненты
-    std::unique_ptr<XtensaCPU> m_cpu0;        // PRO_CPU
-    std::unique_ptr<XtensaCPU> m_cpu1;        // APP_CPU
+    // Core components
+    std::unique_ptr<XtensaCPU> m_cpu0; // PRO_CPU
+    std::unique_ptr<XtensaCPU> m_cpu1; // APP_CPU
     std::unique_ptr<MemoryMap> m_memoryMap;
 
+    // Peripherals
     std::vector<std::unique_ptr<PeripheralComponent>> m_peripherals;
+    std::atomic<int> m_pendingInterrupt{ -1 };
 
-    // События и прерывания
-    struct TimedEvent {
+    // Threading and state
+    std::atomic<bool> m_running{ false };
+    std::thread m_emulationThread;
+    std::atomic<uint64_t> m_globalTick{ 0 };
+
+    // Event system
+    struct ScheduledEvent {
         uint64_t tick;
         std::function<void()> callback;
-        bool operator>(const TimedEvent& other) const { return tick > other.tick; }
+        bool operator>(const ScheduledEvent& other) const { return tick > other.tick; }
     };
-    std::priority_queue<TimedEvent, std::vector<TimedEvent>, std::greater<TimedEvent>> m_eventQueue;
+    std::priority_queue<ScheduledEvent, std::vector<ScheduledEvent>, std::greater<ScheduledEvent>> m_eventQueue;
     std::mutex m_eventMutex;
-
-    // Управление выполнением
-    std::atomic<bool> m_running{false};
-    std::atomic<uint64_t> m_globalTick{0}; // Глобальный тактовый счётчик (в тактах APB = 80 МГц)
-    std::thread m_emulationThread;
 };
 
 #endif // EMULATORCORE_H

@@ -4,91 +4,79 @@
 #include <cstdint>
 #include <vector>
 #include <memory>
-#include <unordered_map>
-#include "memoryblock.h"
+#include <functional> // for std::function
 
-// Предварительные объявления
-class PeripheralComponent;
-class MemoryBlock;
+// Forward declaration
+class XtensaCPU;
 
-// Типы регионов памяти ESP32
-enum class MemoryRegionType {
-    IRAM,   // Instruction RAM (исполняемая, быстрая SRAM)
-    DRAM,   // Data RAM (общая SRAM)
-    IROM,   // Instruction ROM (Flash, исполняемая)
-    DROM,   // Data ROM (Flash, только чтение)
-    RTC_FAST, // RTC Fast Memory
-    PERIPHERAL, // Регистры периферийных устройств
-    INVALID
-};
-
-// Описание одного региона виртуального адресного пространства
-struct MemoryRegion {
-    uint32_t base_address = 0;
-    size_t size = 0;
-    MemoryRegionType type = MemoryRegionType::INVALID;
-    bool read_allowed = false;
-    bool write_allowed = false;
-    bool execute_allowed = false;
-
-    // Указатель на обработчик: либо MemoryBlock, либо PeripheralComponent
-    union {
-        MemoryBlock* memory_block = nullptr;
-        PeripheralComponent* peripheral;
-    } handler;
-
-    // Для регионов PERIPHERAL этот флаг указывает, что handler.peripheral действителен
-    bool is_peripheral = false;
-};
-
-class MemoryMap
-{
+/**
+ * @brief Manages the entire memory address space of the emulated ESP32.
+ * Handles reads/writes to RAM, ROM, Flash, and Peripheral registers.
+ */
+class MemoryMap {
 public:
+    enum class MemoryType {
+        DRAM,
+        IRAM,
+        Flash,
+        ROM,
+        RTC_FAST,
+        RTC_SLOW,
+        Peripheral
+    };
+
+    /**
+     * @brief Callback function type for peripheral register access.
+     * @param cpu The CPU that initiated the access.
+     * @param address The full 32-bit address being accessed.
+     * @param value For writes: the value to write. For reads: ignored.
+     * @param isWrite True if this is a write operation, false for read.
+     * @return For reads: the value to return to the CPU. For writes: ignored.
+     */
+    using PeripheralCallback = std::function<uint32_t(XtensaCPU* cpu, uint32_t address, uint32_t value, bool isWrite)>;
+
     MemoryMap();
-    ~MemoryMap();
 
-    // Инициализация стандартной карты памяти ESP32
-    void initializeDefaultMap();
+    /**
+     * @brief Loads a firmware binary into the Flash memory region.
+     * @param filePath Path to the .bin file.
+     * @throws std::runtime_error if the file cannot be loaded or is too large.
+     */
+    void loadFirmware(const std::string& filePath);
 
-    // Динамическая переконфигурация (эмуляция MMU)
-    bool mapRegion(uint32_t virt_addr, uint32_t phys_addr, size_t size, MemoryRegionType type);
-    bool unmapRegion(uint32_t virt_addr, size_t size);
+    /**
+     * @brief Registers a callback for a specific peripheral register range.
+     * @param baseAddress Start address of the peripheral block.
+     * @param size Size of the block in bytes.
+     * @param callback The function to call on access.
+     */
+    void registerPeripheralHandler(uint32_t baseAddress, size_t size, PeripheralCallback callback);
 
-    // Регистрация периферийного устройства по его базовому адресу
-    void registerPeripheral(uint32_t base_addr, PeripheralComponent* peripheral);
-
-    // Основные операции чтения/записи
-    uint32_t read(uint32_t address);
-    void write(uint32_t address, uint32_t value);
-
-    // Вспомогательные методы для FirmwareLoader
-    void writeBlock(uint32_t address, const uint8_t* data, size_t size);
-    void zeroBlock(uint32_t address, size_t size);
+    // Core memory access methods called by XtensaCPU
+    uint32_t read(XtensaCPU* cpu, uint32_t address);
+    void write(XtensaCPU* cpu, uint32_t address, uint32_t value);
 
 private:
-    // Внутренние вспомогательные методы
-    MemoryRegion* findRegion(uint32_t address);
-    MemoryBlock* getOrCreateMemoryBlock(MemoryRegionType type, uint32_t base, size_t size);
+    struct MemoryRegion {
+        uint32_t baseAddress;
+        size_t size;
+        MemoryType type;
+        std::unique_ptr<uint8_t[]> data; // nullptr for peripherals
+    };
 
-    // Стандартные регионы памяти ESP32 (примерные адреса и размеры)
-    static constexpr uint32_t IRAM_BASE = 0x40080000;
-    static constexpr size_t IRAM_SIZE = 0x20000; // 128 KB
+    struct PeripheralHandler {
+        uint32_t baseAddress;
+        size_t size;
+        PeripheralCallback callback;
+    };
 
-    static constexpr uint32_t DRAM_BASE = 0x3FFB0000;
-    static constexpr size_t DRAM_SIZE = 0x50000; // 320 KB
+    std::vector<MemoryRegion> m_memoryRegions;
+    std::vector<PeripheralHandler> m_peripheralHandlers;
 
-    static constexpr uint32_t IROM_BASE = 0x400D0000;
-    static constexpr size_t IROM_SIZE = 0x1000000; // 16 MB (макс. Flash)
-
-    static constexpr uint32_t DROM_BASE = 0x3F400000;
-    static constexpr size_t DROM_SIZE = 0x1000000; // 16 MB
-
-    static constexpr uint32_t RTC_FAST_BASE = 0x3FF80000;
-    static constexpr size_t RTC_FAST_SIZE = 0x2000; // 8 KB
-
-    // Хранение данных
-    std::vector<MemoryRegion> m_regions;
-    std::unordered_map<MemoryRegionType, std::unique_ptr<MemoryBlock>> m_memoryBlocks;
+    void initializeDefaultMap();
+    void addMemoryRegion(uint32_t baseAddress, size_t size, MemoryType type);
+    MemoryRegion* findMemoryRegion(uint32_t address);
+    PeripheralHandler* findPeripheralHandler(uint32_t address);
 };
 
 #endif // MEMORYMAP_H
