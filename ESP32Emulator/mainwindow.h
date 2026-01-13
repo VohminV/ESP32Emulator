@@ -3,7 +3,19 @@
 
 #include <QMainWindow>
 #include <QThread>
+#include <QXmlStreamReader>
+#include <QFile>
+#include <QDir>
+#include <QMap>
+#include <QList>
+#include <QFileInfo>
+#include <QString>
+#include <QPixmap>
+#include <QSvgRenderer>
+#include <QPainter>
+
 #include "workerobject.h"
+#include "projecttreewidget.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
@@ -19,19 +31,28 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
 
+    // Загрузка компонентов Fritzing
+    void loadFritzingParts();
+
 private slots:
     void on_actionStart_triggered();
     void on_actionStop_triggered();
     void on_actionStep_triggered();
 
+    void filterComponents(const QString &text);
     void appendLog(const QString &message);
     void onEmulationStateChanged(bool running);
 
 private:
     Ui::MainWindow *ui;
 
+    // Поток для WorkerObject
     QThread m_workerThread;
-    WorkerObject m_workerObject;
+    WorkerObject *m_workerObject;
+
+    // Вспомогательные функции
+    QList<QFileInfo> findFzpRecursive(const QString &dirPath);
+    QString findSvgFileRecursive(const QString &baseDir, const QString &fileName);
 };
 
 #endif // MAINWINDOW_H

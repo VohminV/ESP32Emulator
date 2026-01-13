@@ -16,7 +16,7 @@
   <widget class="QWidget" name="centralwidget">
    <layout class="QVBoxLayout" name="verticalLayout">
     <item>
-     <layout class="QHBoxLayout" name="horizontalLayout">
+     <layout class="QHBoxLayout" name="topButtons">
       <item>
        <widget class="QPushButton" name="btnStart">
         <property name="text">
@@ -39,7 +39,7 @@
        </widget>
       </item>
       <item>
-       <spacer name="horizontalSpacer">
+       <spacer name="spacerHorizontal">
         <property name="orientation">
          <enum>Qt::Orientation::Horizontal</enum>
         </property>
@@ -58,10 +58,76 @@
     </item>
     <item>
      <widget class="QTabWidget" name="tabWidget">
+      <property name="currentIndex">
+       <number>0</number>
+      </property>
       <widget class="QWidget" name="tabSchematic">
        <attribute name="title">
         <string>Schematic</string>
        </attribute>
+       <layout class="QHBoxLayout" name="schematicHBox">
+        <item>
+         <layout class="QVBoxLayout" name="libraryLayout">
+          <item>
+           <widget class="QLabel" name="labelLibrary">
+            <property name="text">
+             <string>Component Library</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignmentFlag::AlignCenter</set>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLineEdit" name="editSearch">
+            <property name="placeholderText">
+             <string>Search components...</string>
+            </property>
+            <property name="clearButtonEnabled">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QTreeWidget" name="treeComponents">
+            <column>
+             <property name="text">
+              <string>Component</string>
+             </property>
+            </column>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QVBoxLayout" name="projectLayout">
+          <item>
+           <widget class="QLabel" name="labelProject">
+            <property name="text">
+             <string>Project Components</string>
+            </property>
+            <property name="alignment">
+             <set>Qt::AlignmentFlag::AlignCenter</set>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QTreeWidget" name="treeProjectComponents">
+            <column>
+             <property name="text">
+              <string>Component</string>
+             </property>
+            </column>
+            <column>
+             <property name="text">
+              <string>Type</string>
+             </property>
+            </column>
+           </widget>
+          </item>
+         </layout>
+        </item>
+       </layout>
       </widget>
       <widget class="QWidget" name="tabCode">
        <attribute name="title">
@@ -78,9 +144,6 @@
    </layout>
   </widget>
   <widget class="QDockWidget" name="dockLogger">
-   <property name="floating">
-    <bool>false</bool>
-   </property>
    <property name="windowTitle">
     <string>Protocol Log</string>
    </property>
@@ -90,9 +153,6 @@
    <widget class="QTextEdit" name="textEditLog"/>
   </widget>
   <widget class="QDockWidget" name="dockRegisters">
-   <property name="floating">
-    <bool>false</bool>
-   </property>
    <property name="windowTitle">
     <string>Registers &amp; Memory</string>
    </property>
@@ -102,7 +162,7 @@
    <widget class="QTreeWidget" name="treeRegisters">
     <column>
      <property name="text">
-      <string notr="true">1</string>
+      <string>Register</string>
      </property>
     </column>
    </widget>
