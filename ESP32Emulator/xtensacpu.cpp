@@ -1,82 +1,159 @@
 #include "xtensacpu.h"
-#include "memorymap.h" // Ensure MemoryMap is defined
-#include <cstring> // for memset
-#include <stdexcept>
+#include "MemoryMap.h" // Предполагается, что MemoryMap.h существует
+
+// Коды исключений (EXCCAUSE)
+constexpr uint32_t EXC_ILLEGAL = 2;
+constexpr uint32_t EXC_INSTR_ERROR = 3;
+constexpr uint32_t EXC_LOAD_STORE_ERROR = 4;
+constexpr uint32_t EXC_LEVEL1_INTERRUPT = 6;
 
 XtensaCPU::XtensaCPU(MemoryMap* memoryMap, bool isProCpu)
     : m_memoryMap(memoryMap), m_isProCpu(isProCpu) {
-    if (!m_memoryMap) {
-        throw std::invalid_argument("MemoryMap cannot be null");
-    }
     reset();
 }
 
 void XtensaCPU::reset() {
-    // Clear all general-purpose registers
-    std::memset(m_generalRegisters, 0, sizeof(m_generalRegisters));
+    // Инициализация GPR нулями (A0=0 по соглашению ABI)
+    for (auto& reg : m_gpr) reg = 0;
     
-    // Reset PC to the standard entry point
-    m_pc = 0x400D0000;
-
-    // Initialize key special registers
-    m_specialRegisters[PS] = 0x0000000F; // Kernel mode, interrupts masked
-    m_specialRegisters[EPC1] = 0;
-    m_specialRegisters[EXCCAUSE] = 0;
-    m_specialRegisters[INTENABLE] = 0;
-
-    // Clear pending interrupts
-    m_pendingInterrupt = 0;
+    // Начальный PC зависит от ядра
+    m_pc = m_isProCpu ? 0x400D0000 : 0x400D0004;
+    
+    // Сброс специальных регистров
+    for (auto& reg : m_specialRegs) reg = 0;
+    
+    // Настройка PS: разрешить прерывания, уровень 0, режим ядра
+    m_ps.intlevel = 0;
+    m_ps.excm = 0;
+    m_ps.um = 0;
+    m_ps.ring = 0;
+    m_ps.intenable = 1;
+    
+    m_pendingIrq = 0;
+    m_exceptionPending = false;
 }
 
 void XtensaCPU::executeCycle() {
-    // Check for pending interrupts first
-    if (m_pendingInterrupt != 0) {
-        handleInterrupt();
+    if (m_exceptionPending) {
+        handlePendingException();
         return;
     }
 
-    // Simple fetch-execute cycle
-    try {
-        uint32_t instruction = fetchInstruction();
-        
-        // For this minimal version, we do nothing with the instruction.
-        // In a real implementation, you would decode and execute it here.
-        // This is just a placeholder to show the cycle structure.
-
-        // Move PC to the next instruction (assuming 32-bit for simplicity)
-        m_pc += 4;
-    } catch (const std::exception& e) {
-        // In a full implementation, this would trigger an exception.
-        // For now, we just re-throw for the EmulatorCore to handle.
-        throw;
-    }
+    const uint32_t instr = fetchInstruction();
+    decodeAndExecute(instr);
 }
 
 uint32_t XtensaCPU::fetchInstruction() {
-    if (!m_memoryMap) {
-        throw std::runtime_error("MemoryMap is not initialized");
+    // Harvard-архитектура: выборка только из пространства инструкций
+    try {
+        return m_memoryMap->readInstruction(m_pc);
+    } catch (...) {
+        // Ошибка доступа к памяти → исключение
+        m_specialRegs[EXCCAUSE] = EXC_INSTR_ERROR;
+        m_exceptionPending = true;
+        return 0;
     }
-    return m_memoryMap->read(this, m_pc);
+}
+
+void XtensaCPU::decodeAndExecute(uint32_t instr) {
+    const uint32_t opcode = instr & 0xF; // Младшие 4 бита для 16-битных инстр.
+    
+    // Обработка 16-битных инструкций
+    if ((instr & 0xFFFF0000) == 0) {
+        const uint32_t imm = (instr >> 4) & 0xFFFFF; // 20-битный литерал
+        const uint32_t rt = (instr >> 12) & 0xF;     // Целевой регистр
+        
+        switch (opcode) {
+            case 0x2: // l32r (Load 32-bit literal)
+                m_gpr[rt] = static_cast<int32_t>(imm << 12) >> 12; // Sign-extend 20→32
+                m_pc += 2;
+                return;
+                
+            case 0x5: // nop
+                m_pc += 2;
+                return;
+        }
+    }
+    
+    // Обработка 32-битных инструкций
+    const uint32_t op2 = (instr >> 12) & 0xF;
+    const uint32_t rs = (instr >> 8) & 0xF;
+    const uint32_t rt = (instr >> 4) & 0xF;
+    const uint32_t rd = instr & 0xF;
+    
+    switch (op2) {
+        case 0x0: // callx0
+            m_specialRegs[EXCSAVE1] = m_pc + 3; // Адрес возврата
+            m_pc = m_gpr[rs];
+            return;
+            
+        case 0x1: // retw.n (Return from windowed call)
+            m_pc = m_specialRegs[EXCSAVE1];
+            return;
+            
+        case 0x2: // rsil (Rotate and Set Interrupt Level)
+            m_gpr[rt] = m_ps.intlevel;
+            m_ps.intlevel = rs; // rs содержит новый уровень
+            m_pc += 3;
+            return;
+            
+        case 0x3: // waiti (Wait for Interrupt)
+            // Эмуляция: просто ждём до следующего прерывания
+            m_pc += 3;
+            return;
+            
+        default:
+            // Неизвестная инструкция → исключение
+            m_specialRegs[EXCCAUSE] = EXC_ILLEGAL;
+            m_exceptionPending = true;
+            return;
+    }
 }
 
 void XtensaCPU::requestInterrupt(int irqNumber) {
-    // Set the corresponding bit in the pending interrupt register
-    m_pendingInterrupt |= (1U << irqNumber);
+    if (irqNumber < 0 || irqNumber >= 32) return;
+    
+    const uint32_t irqMask = 1U << irqNumber;
+    
+    // Проверка глобального разрешения и маски INTENABLE
+    if (m_ps.intenable && (m_specialRegs[INTENABLE] & irqMask)) {
+        m_pendingIrq |= irqMask;
+    }
 }
 
-void XtensaCPU::handleInterrupt() {
-    // Save current PC to EPC1
-    m_specialRegisters[EPC1] = m_pc;
+void XtensaCPU::handlePendingException() {
+    // Определение причины исключения
+    uint32_t cause = m_specialRegs[EXCCAUSE];
     
-    // Set a dummy exception cause (e.g., timer interrupt)
-    m_specialRegisters[EXCCAUSE] = 6; 
+    // Для прерываний: проверяем ожидающие IRQ
+    if (cause == 0 && m_pendingIrq) {
+        // Находим IRQ с highest priority (старший бит)
+        const int irq = 31 - __builtin_clz(m_pendingIrq);
+        cause = EXC_LEVEL1_INTERRUPT;
+        m_pendingIrq &= ~(1U << irq); // Сбрасываем флаг
+    }
     
-    // Disable interrupts in PS (clear IE bit - bit 4 in this simplified model)
-    m_specialRegisters[PS] &= ~(1U << 4);
+    // Вход в режим исключения
+    enterExceptionMode(cause, 0x40000000); // База векторов для ESP32
+    m_exceptionPending = false;
+}
+
+void XtensaCPU::enterExceptionMode(uint32_t cause, uint32_t vectorBase) {
+    // Сохранение контекста
+    m_specialRegs[EPC1] = m_pc;          // Адрес ошибочной инструкции
+    m_specialRegs[EXCSAVE1] = m_ps.raw(); // Сохранение PS
     
-    // Jump to a fixed interrupt vector address
-    m_pc = 0x40000400; // Standard ESP32 interrupt vector in ROM
+    // Настройка нового состояния
+    m_ps.excm = 1;                       // Режим исключения
+    m_ps.intlevel = 15;                  // Маскируем все прерывания
+    m_ps.intenable = 0;
     
-    // Clear the pending interrupt flag
-    m_pendingInterrupt = 0;
+    // Загрузка вектора прерывания
+    m_pc = getVectorAddress(cause);
+}
+
+uint32_t XtensaCPU::getVectorAddress(uint32_t cause) const {
+    // ESP32 использует фиксированные векторы:
+    // 0x40000000 + (cause * 0x100)
+    return 0x40000000 + (cause << 8);
 }

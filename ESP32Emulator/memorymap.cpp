@@ -1,5 +1,5 @@
 #include "memorymap.h"
-#include "xtensacpu.h" // Include CPU definition for callbacks
+#include "xtensacpu.h"
 #include <fstream>
 #include <cstring>
 #include <stdexcept>
@@ -12,30 +12,38 @@ void MemoryMap::initializeDefaultMap() {
     m_memoryRegions.clear();
     m_peripheralHandlers.clear();
 
-    // === Внутренняя память (Internal SRAM) ===
-    addMemoryRegion(0x3FFB0000, 0x80000, MemoryType::DRAM); // 512 KB DRAM
-    addMemoryRegion(0x40080000, 0x40000, MemoryType::IRAM); // 256 KB IRAM
+    // === Внутренняя память (согласно Table 4-1, ESP32 Datasheet v5.2) ===
+    addMemoryRegion(0x40000000, 0x60000, MemoryType::ROM);        // Boot ROM (384 KB)
+    addMemoryRegion(0x3FF90000, 0x10000, MemoryType::ROM);        // Internal ROM 1 (64 KB)
 
-    // === Внешняя флеш-память (External Flash) ===
-    addMemoryRegion(0x3F000000, 0x400000, MemoryType::Flash); // 4 MB Flash
+    addMemoryRegion(0x40070000, 0x30000, MemoryType::IRAM);       // IRAM0 (192 KB)
+    addMemoryRegion(0x400A0000, 0x20000, MemoryType::IRAM);       // IRAM1 alias (128 KB)
 
-    // === ROM (Boot ROM) ===
-    addMemoryRegion(0x40000000, 0x8000, MemoryType::ROM); // 32 KB Boot ROM
+    addMemoryRegion(0x3FFE0000, 0x20000, MemoryType::DRAM);       // DRAM (128 KB)
+    addMemoryRegion(0x3FFAE000, 0x32000, MemoryType::DRAM);       // DRAM2 (200 KB)
 
-    // === RTC Memory ===
-    addMemoryRegion(0x50000000, 0x2000, MemoryType::RTC_FAST); // 8 KB Fast
-    addMemoryRegion(0x50002000, 0x2000, MemoryType::RTC_SLOW); // 8 KB Slow
+    addMemoryRegion(0x3FF80000, 0x2000, MemoryType::RTC_FAST);    // RTC FAST (8 KB)
+    addMemoryRegion(0x400C0000, 0x2000, MemoryType::RTC_FAST);    // RTC FAST alias
 
-    // === Периферийные регистры (Peripheral Registers) ===
-    // Регионы объявлены, но обработчики будут зарегистрированы позже через registerPeripheralHandler
-    addMemoryRegion(0x3FF40000, 0x1000, MemoryType::Peripheral); // UART0
-    addMemoryRegion(0x3FF5F000, 0x1000, MemoryType::Peripheral); // TIMG0
+    addMemoryRegion(0x50000000, 0x2000, MemoryType::RTC_SLOW);    // RTC SLOW (8 KB)
 
-    // Инициализация выделенной памяти для каждого региона
+    // === Внешняя Flash (XIP) ===
+    addMemoryRegion(0x3F400000, 0x400000, MemoryType::Flash);     // External Flash (4 MB)
+    addMemoryRegion(0x400C2000, 0xB3F000, MemoryType::Flash);     // XIP region (11 MB + 248 KB)
+
+    // === Периферийные регистры ===
+    addMemoryRegion(0x3FF00000, 0x10000, MemoryType::Peripheral); // Peripheral base
+    // Конкретные блоки (UART0, TIMG0 и др.) будут обрабатываться через callback'и
+
+    // Инициализация выделенной памяти
     for (auto& region : m_memoryRegions) {
         if (region.type != MemoryType::Peripheral) {
             region.data = std::make_unique<uint8_t[]>(region.size);
-            std::memset(region.data.get(), 0xFF, region.size); // Flash обычно инициализируется 0xFF
+            if (region.type == MemoryType::Flash) {
+                std::memset(region.data.get(), 0xFF, region.size); // Flash инициализируется 0xFF
+            } else {
+                std::memset(region.data.get(), 0x00, region.size); // RAM — нулями
+            }
         }
     }
 }
@@ -53,73 +61,95 @@ void MemoryMap::loadFirmware(const std::string& filePath) {
     std::streamsize fileSize = file.tellg();
     file.seekg(0, std::ios::beg);
 
-    // Найти регион Flash
+    // Ищем основной регион Flash (XIP)
     MemoryRegion* flashRegion = nullptr;
     for (auto& region : m_memoryRegions) {
-        if (region.type == MemoryType::Flash) {
+        if (region.type == MemoryType::Flash && region.baseAddress == 0x400C2000) {
             flashRegion = &region;
             break;
         }
     }
 
-    if (!flashRegion) {
-        throw std::runtime_error("Flash memory region not found");
+    if (!flashRegion || static_cast<size_t>(fileSize) > flashRegion->size) {
+        throw std::runtime_error("Firmware too large or Flash region not found");
     }
 
-    if (static_cast<size_t>(fileSize) > flashRegion->size) {
-        throw std::runtime_error("Firmware file is larger than Flash region");
-    }
-
-    // Загрузить файл в память Flash
     file.read(reinterpret_cast<char*>(flashRegion->data.get()), fileSize);
-    // Оставшаяся часть Flash остаётся заполненной 0xFF
 }
 
 void MemoryMap::registerPeripheralHandler(uint32_t baseAddress, size_t size, PeripheralCallback callback) {
     m_peripheralHandlers.push_back({baseAddress, size, callback});
 }
 
-uint32_t MemoryMap::read(XtensaCPU* cpu, uint32_t address) {
-    auto* memRegion = findMemoryRegion(address);
-    if (!memRegion) {
-        throw std::runtime_error("Read from unmapped address: 0x" + std::to_string(address));
+// --- Harvard-архитектура: отдельные методы для инструкций и данных ---
+
+uint32_t MemoryMap::readInstruction(uint32_t address) {
+    auto* region = findMemoryRegion(address);
+    if (!region) {
+        throw std::runtime_error("Instruction fetch from unmapped address: 0x" + std::to_string(address));
     }
 
-    if (memRegion->type == MemoryType::Peripheral) {
-        auto* periphHandler = findPeripheralHandler(address);
-        if (periphHandler) {
-            // Вызвать зарегистрированный обработчик
-            return periphHandler->callback(cpu, address, 0, false);
-        } else {
-            // Нет обработчика, возвращаем 0 по умолчанию
-            return 0;
-        }
+    // Инструкции можно читать только из IRAM, ROM, Flash
+    if (region->type != MemoryType::IRAM &&
+        region->type != MemoryType::ROM &&
+        region->type != MemoryType::Flash) {
+        throw std::runtime_error("Illegal instruction fetch from data region: 0x" + std::to_string(address));
     }
 
-    // Чтение из обычной памяти
-    size_t offset = address - memRegion->baseAddress;
-    return *reinterpret_cast<uint32_t*>(memRegion->data.get() + offset);
+    if (region->type == MemoryType::Peripheral) {
+        // Это не должно происходить при правильной настройке
+        return 0;
+    }
+
+    size_t offset = address - region->baseAddress;
+    return *reinterpret_cast<uint32_t*>(region->data.get() + offset);
 }
 
-void MemoryMap::write(XtensaCPU* cpu, uint32_t address, uint32_t value) {
-    auto* memRegion = findMemoryRegion(address);
-    if (!memRegion) {
-        throw std::runtime_error("Write to unmapped address: 0x" + std::to_string(address));
+uint32_t MemoryMap::readData(uint32_t address) {
+    auto* region = findMemoryRegion(address);
+    if (!region) {
+        // Чтение из неотображённого адреса → возврат 0 (как в реальном железе)
+        return 0;
     }
 
-    if (memRegion->type == MemoryType::Peripheral) {
-        auto* periphHandler = findPeripheralHandler(address);
-        if (periphHandler) {
-            // Вызвать зарегистрированный обработчик
-            periphHandler->callback(cpu, address, value, true);
+    if (region->type == MemoryType::Peripheral) {
+        auto* handler = findPeripheralHandler(address);
+        if (handler) {
+            return handler->callback(nullptr, address, 0, false);
         }
-        // Если обработчика нет, запись просто игнорируется
+        return 0; // По умолчанию
+    }
+
+    size_t offset = address - region->baseAddress;
+    return *reinterpret_cast<uint32_t*>(region->data.get() + offset);
+}
+
+void MemoryMap::writeData(uint32_t address, uint32_t value) {
+    auto* region = findMemoryRegion(address);
+    if (!region) {
+        // Запись в неотображённый адрес игнорируется
         return;
     }
 
-    // Запись в обычную память
-    size_t offset = address - memRegion->baseAddress;
-    *reinterpret_cast<uint32_t*>(memRegion->data.get() + offset) = value;
+    if (region->type == MemoryType::Peripheral) {
+        auto* handler = findPeripheralHandler(address);
+        if (handler) {
+            handler->callback(nullptr, address, value, true);
+        }
+        return;
+    }
+
+    // Защита от записи в ROM/Flash/IRAM (в общем случае)
+    if (region->type == MemoryType::ROM ||
+        region->type == MemoryType::Flash ||
+        region->type == MemoryType::IRAM) {
+        // В реальном ESP32 запись в IRAM разрешена, но для простоты пока запрещаем
+        // TODO: реализовать защиту по MPU/MMU
+        return;
+    }
+
+    size_t offset = address - region->baseAddress;
+    *reinterpret_cast<uint32_t*>(region->data.get() + offset) = value;
 }
 
 MemoryMap::MemoryRegion* MemoryMap::findMemoryRegion(uint32_t address) {

@@ -1,20 +1,16 @@
 #include "emulatorcore.h"
-#include "peripheralcomponent.h" // Assuming you have this header
+#include "peripheralcomponent.h"
 #include <iostream>
 #include <cassert>
 #include <fstream>
-
-// Константы ESP32
-constexpr uint64_t APB_CLK_HZ = 80'000'000ULL; // Тактовая частота шины APB
-constexpr uint64_t TICKS_PER_US = APB_CLK_HZ / 1'000'000ULL; // 80 тактов на микросекунду
+#include <thread>
 
 EmulatorCore::EmulatorCore()
-    // Передаем указатель на m_memoryMap в конструкторы CPU
-    : m_cpu0(std::make_unique<XtensaCPU>(m_memoryMap.get(), true))  // PRO_CPU
-    , m_cpu1(std::make_unique<XtensaCPU>(m_memoryMap.get(), false)) // APP_CPU
-    , m_memoryMap(std::make_unique<MemoryMap>())
+    : m_memoryMap(std::make_unique<MemoryMap>())
+    , m_cpu0(std::make_unique<XtensaCPU>(m_memoryMap.get(), true))   // PRO_CPU
+    , m_cpu1(std::make_unique<XtensaCPU>(m_memoryMap.get(), false))  // APP_CPU
 {
-    // MemoryMap уже инициализируется в своем конструкторе
+    // MemoryMap уже инициализирован в своем конструкторе
 }
 
 EmulatorCore::~EmulatorCore() {
@@ -24,9 +20,8 @@ EmulatorCore::~EmulatorCore() {
 bool EmulatorCore::loadFirmware(const std::string& path) {
     try {
         m_memoryMap->loadFirmware(path);
-        
-        // Для простоты установим PC обоих ядер на стандартную точку входа.
-        // В реальности загрузчик из ROM должен это сделать.
+        // Для простоты: оба ядра начинают с точки входа приложения.
+        // В продвинутой версии здесь должна быть эмуляция Boot ROM.
         constexpr uint32_t ENTRY_POINT = 0x400D0000;
         m_cpu0->setPC(ENTRY_POINT);
         m_cpu1->setPC(ENTRY_POINT);
@@ -39,7 +34,6 @@ bool EmulatorCore::loadFirmware(const std::string& path) {
 
 void EmulatorCore::start() {
     if (m_running.exchange(true)) return;
-
     m_emulationThread = std::thread([this]() {
         while (m_running.load()) {
             tick();
@@ -59,17 +53,28 @@ void EmulatorCore::step() {
 }
 
 void EmulatorCore::addPeripheral(std::unique_ptr<PeripheralComponent> peripheral) {
-    // Регистрация обработчика в MemoryMap через callback
     auto baseAddr = peripheral->getBaseAddress();
-    auto size = peripheral->getSize(); // Предполагается, что PeripheralComponent знает свой размер
+    auto size = peripheral->getSize();
 
+    // Создаём интерфейс для этой периферии
+    PeripheralComponent::SystemInterface sysInterface;
+    sysInterface.requestInterrupt = [this](int irq) { this->requestInterrupt(irq); };
+    sysInterface.scheduleEventRelative = [this](uint64_t ticks, auto cb) {
+        this->scheduleEventRelative(ticks, std::move(cb));
+    };
+    sysInterface.getCurrentTick = [this]() { return this->m_globalTick.load(); };
+
+    // Передаём интерфейс периферии
+    peripheral->setSystemInterface(std::move(sysInterface));
+
+    // Регистрируем callback в MemoryMap
     m_memoryMap->registerPeripheralHandler(baseAddr, size,
-        [this, periphPtr = peripheral.get()](XtensaCPU* cpu, uint32_t addr, uint32_t val, bool isWrite) -> uint32_t {
+        [periphPtr = peripheral.get()](XtensaCPU* /*cpu*/, uint32_t addr, uint32_t val, bool isWrite) -> uint32_t {
             if (isWrite) {
-                periphPtr->write(cpu, addr, val);
-                return 0; // Значение игнорируется при записи
+                periphPtr->write(addr, val);
+                return 0;
             } else {
-                return periphPtr->read(cpu, addr);
+                return periphPtr->read(addr);
             }
         }
     );
@@ -77,15 +82,15 @@ void EmulatorCore::addPeripheral(std::unique_ptr<PeripheralComponent> peripheral
     m_peripherals.push_back(std::move(peripheral));
 }
 
+// --- Отладочные методы ---
 uint32_t EmulatorCore::readMemory(uint32_t address) {
-    // Для внешнего API используем CPU0 как контекст
-    return m_memoryMap->read(m_cpu0.get(), address);
+    return m_memoryMap->readData(address);
 }
 
 void EmulatorCore::writeMemory(uint32_t address, uint32_t value) {
-    // Для внешнего API используем CPU0 как контекст
-    m_memoryMap->write(m_cpu0.get(), address, value);
+    m_memoryMap->writeData(address, value);
 }
+// -------------------------
 
 void EmulatorCore::tick() {
     const uint64_t currentTick = m_globalTick.fetch_add(1);
@@ -100,13 +105,13 @@ void EmulatorCore::tick() {
         }
     }
 
-    // 2. Обновление состояния всех периферийных устройств
+    // 2. Обновление состояния периферии
     for (auto& p : m_peripherals) {
         p->onTick(currentTick);
     }
 
-    // 3. Выполнение одного такта CPU
-    // Теперь CPU сами вызывают MemoryMap с передачей своего указателя
+    // 3. Выполнение одного цикла для каждого CPU
+    // CPU сами заботятся о вызове правильных методов MemoryMap (fetch vs load/store)
     m_cpu0->executeCycle();
     m_cpu1->executeCycle();
 
@@ -122,17 +127,21 @@ void EmulatorCore::executeForUs(uint64_t us) {
 }
 
 void EmulatorCore::dispatchPendingInterrupts() {
-    // Проверяем флаг, установленный методом requestInterrupt
-    int pendingIrq = m_pendingInterrupt.load();
-    if (pendingIrq >= 0) {
-        m_cpu0->requestInterrupt(pendingIrq); // PRO_CPU обрабатывает прерывания
-        m_pendingInterrupt.store(-1); // Сброс флага
+    const uint32_t pendingMask = m_pendingIrqMask.load();
+    if (pendingMask != 0) {
+        // В реальном ESP32 прерывания могут маршрутизироваться на любое ядро.
+        // Для простоты отправим все на PRO_CPU (m_cpu0).
+        m_cpu0->requestInterrupt(__builtin_ctz(pendingMask)); // Берем младший установленный бит
+        // Сбрасываем флаг этого IRQ
+        m_pendingIrqMask.fetch_and(~(1U << __builtin_ctz(pendingMask)));
     }
 }
 
 // Этот метод вызывается из периферийных компонентов
 void EmulatorCore::requestInterrupt(int irqNumber) {
-    m_pendingInterrupt.store(irqNumber);
+    if (irqNumber >= 0 && irqNumber < 32) {
+        m_pendingIrqMask.fetch_or(1U << irqNumber);
+    }
 }
 
 void EmulatorCore::scheduleEvent(uint64_t tick, std::function<void()> callback) {
@@ -141,8 +150,7 @@ void EmulatorCore::scheduleEvent(uint64_t tick, std::function<void()> callback) 
 }
 
 void EmulatorCore::scheduleEventRelative(uint64_t ticksFromNow, std::function<void()> callback) {
-    uint64_t currentTick = m_globalTick.load();
-    scheduleEvent(currentTick + ticksFromNow, std::move(callback));
+    scheduleEvent(m_globalTick.load() + ticksFromNow, std::move(callback));
 }
 
 bool EmulatorCore::isRunning() const {
