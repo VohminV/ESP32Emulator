@@ -1,159 +1,195 @@
+// xtensacpu.cpp
 #include "xtensacpu.h"
-#include "MemoryMap.h" // Предполагается, что MemoryMap.h существует
+#include "memorymap.h"
+#include <stdexcept>
+#include <iostream>
+#include <cstring>
 
-// Коды исключений (EXCCAUSE)
-constexpr uint32_t EXC_ILLEGAL = 2;
-constexpr uint32_t EXC_INSTR_ERROR = 3;
-constexpr uint32_t EXC_LOAD_STORE_ERROR = 4;
-constexpr uint32_t EXC_LEVEL1_INTERRUPT = 6;
+// === Глобальные константы (только для этого .cpp файла) ===
+namespace {
+    constexpr uint32_t EXC_ILLEGAL           = 2;
+    constexpr uint32_t EXC_INSTR_ERROR       = 3;  // Невалидный адрес инструкции
+    constexpr uint32_t EXC_LOAD_STORE_ERROR  = 4;  // Ошибка доступа к данным
+    constexpr uint32_t EXC_LEVEL1_INTERRUPT  = 6;  // Прерывание уровня 1
+
+    // Уровни приоритетов IRQ в ESP32 (аппаратно фиксированы)
+    constexpr uint8_t IRQ_PRIORITY[32] = {
+        1, 1, 1, 1, 1, 1, 1, 1, // GPIO0–7
+        3, 3, 3, 3,             // Timer0–3
+        5, 5,                   // UART0, UART1
+        7,                      // SPI0
+        9,                      // I2C
+        11,                     // WiFi
+        13,                     // BT
+        15, 15, 15, 15, 15, 15, 15, 15 // остальные — высший приоритет
+    };
+}
 
 XtensaCPU::XtensaCPU(MemoryMap* memoryMap, bool isProCpu)
-    : m_memoryMap(memoryMap), m_isProCpu(isProCpu) {
+    : m_memoryMap(memoryMap)
+    , m_isProCpu(isProCpu)
+{
     reset();
 }
 
 void XtensaCPU::reset() {
-    // Инициализация GPR нулями (A0=0 по соглашению ABI)
-    for (auto& reg : m_gpr) reg = 0;
-    
-    // Начальный PC зависит от ядра
-    m_pc = m_isProCpu ? 0x400D0000 : 0x400D0004;
-    
-    // Сброс специальных регистров
-    for (auto& reg : m_specialRegs) reg = 0;
-    
-    // Настройка PS: разрешить прерывания, уровень 0, режим ядра
-    m_ps.intlevel = 0;
-    m_ps.excm = 0;
-    m_ps.um = 0;
-    m_ps.ring = 0;
-    m_ps.intenable = 1;
-    
+    std::memset(m_gpr, 0, sizeof(m_gpr));
+    std::memset(m_specialRegs, 0, sizeof(m_specialRegs));
+
+    auto& p = ps();
+    p.intlevel   = 0;
+    p.excm       = 0;
+    p.um         = 0;
+    p.ring       = 0;
+    p.owb        = 0;
+    p.callinc    = 0;
+    p.intenable  = 1;
+
     m_pendingIrq = 0;
     m_exceptionPending = false;
+    m_pc = m_isProCpu ? 0x40000400 : 0x00000000;
 }
 
 void XtensaCPU::executeCycle() {
+    if (!m_isProCpu && m_pc == 0) {
+        return; // APP_CPU не запущен
+    }
+
     if (m_exceptionPending) {
         handlePendingException();
         return;
     }
 
-    const uint32_t instr = fetchInstruction();
+    if (ps().intenable && !ps().excm) {
+        uint32_t enabledIrqs = m_pendingIrq & m_specialRegs[INTENABLE];
+        if (enabledIrqs != 0) {
+            int best_irq = -1;
+            int best_prio = -1;
+            for (int i = 0; i < 32; ++i) {
+                if ((enabledIrqs >> i) & 1) {
+                    int prio = IRQ_PRIORITY[i];
+                    if (prio > static_cast<int>(ps().intlevel) && prio > best_prio) {
+                        best_prio = prio;
+                        best_irq = i;
+                    }
+                }
+            }
+            if (best_irq >= 0) {
+                enterExceptionMode(EXC_LEVEL1_INTERRUPT, 0);
+                m_pendingIrq &= ~(1U << best_irq);
+                return;
+            }
+        }
+    }
+
+    uint32_t instr;
+    try {
+        instr = fetchInstruction();
+    } catch (...) {
+        return;
+    }
     decodeAndExecute(instr);
 }
 
 uint32_t XtensaCPU::fetchInstruction() {
-    // Harvard-архитектура: выборка только из пространства инструкций
+    uint32_t value;
     try {
-        return m_memoryMap->readInstruction(m_pc);
-    } catch (...) {
-        // Ошибка доступа к памяти → исключение
+        value = m_memoryMap->readInstruction(m_pc);
+    } catch (const std::exception&) {
         m_specialRegs[EXCCAUSE] = EXC_INSTR_ERROR;
         m_exceptionPending = true;
-        return 0;
+        throw;
     }
+    return value;
 }
 
 void XtensaCPU::decodeAndExecute(uint32_t instr) {
-    const uint32_t opcode = instr & 0xF; // Младшие 4 бита для 16-битных инстр.
-    
-    // Обработка 16-битных инструкций
-    if ((instr & 0xFFFF0000) == 0) {
-        const uint32_t imm = (instr >> 4) & 0xFFFFF; // 20-битный литерал
-        const uint32_t rt = (instr >> 12) & 0xF;     // Целевой регистр
-        
+    bool is_16bit = (instr & 0xFFFF0000) == 0;
+
+    if (is_16bit) {
+        uint32_t opcode = instr & 0xF;
+        uint32_t rt = (instr >> 12) & 0xF;
         switch (opcode) {
-            case 0x2: // l32r (Load 32-bit literal)
-                m_gpr[rt] = static_cast<int32_t>(imm << 12) >> 12; // Sign-extend 20→32
+            case 0x2: { // l32r aX, imm20
+                uint32_t imm20 = (instr >> 4) & 0xFFFFF;
+                int32_t sign_extended = static_cast<int32_t>(imm20 << 12) >> 12;
+                m_gpr[rt] = sign_extended;
                 m_pc += 2;
                 return;
-                
-            case 0x5: // nop
+            }
+            case 0x5: // nop.n
                 m_pc += 2;
+                return;
+            default:
+                m_specialRegs[EXCCAUSE] = EXC_ILLEGAL;
+                m_exceptionPending = true;
                 return;
         }
     }
-    
-    // Обработка 32-битных инструкций
-    const uint32_t op2 = (instr >> 12) & 0xF;
-    const uint32_t rs = (instr >> 8) & 0xF;
-    const uint32_t rt = (instr >> 4) & 0xF;
-    const uint32_t rd = instr & 0xF;
-    
-    switch (op2) {
-        case 0x0: // callx0
-            m_specialRegs[EXCSAVE1] = m_pc + 3; // Адрес возврата
-            m_pc = m_gpr[rs];
-            return;
-            
-        case 0x1: // retw.n (Return from windowed call)
-            m_pc = m_specialRegs[EXCSAVE1];
-            return;
-            
-        case 0x2: // rsil (Rotate and Set Interrupt Level)
-            m_gpr[rt] = m_ps.intlevel;
-            m_ps.intlevel = rs; // rs содержит новый уровень
-            m_pc += 3;
-            return;
-            
-        case 0x3: // waiti (Wait for Interrupt)
-            // Эмуляция: просто ждём до следующего прерывания
-            m_pc += 3;
-            return;
-            
-        default:
-            // Неизвестная инструкция → исключение
-            m_specialRegs[EXCCAUSE] = EXC_ILLEGAL;
-            m_exceptionPending = true;
-            return;
+
+    uint32_t op0 = (instr >> 24) & 0xFF;
+    uint32_t rs = (instr >> 8) & 0xF;
+    uint32_t rt = (instr >> 4) & 0xF;
+    uint32_t rd = instr & 0xF;
+
+    if (op0 == 0x00) {
+        m_specialRegs[EXCSAVE1] = m_pc + 3;
+        m_pc = m_gpr[rs];
+        return;
+    } else if (op0 == 0x01) {
+        m_pc = m_specialRegs[EXCSAVE1];
+        return;
+    } else if (op0 == 0x02) {
+        m_gpr[rt] = ps().intlevel;
+        ps().intlevel = rs & 0xF;
+        m_pc += 3;
+        return;
+    } else if (op0 == 0x03) {
+        ps().intlevel = rs & 0xF;
+        m_pc += 3;
+        return;
+    } else if ((instr & 0xFFF00000) == 0x00400000) {
+        m_gpr[rt] = m_gpr[rs];
+        m_pc += 3;
+        return;
+    } else if ((instr & 0xFFF00000) == 0x00500000) {
+        m_gpr[rd] = m_gpr[rs] + m_gpr[rt];
+        m_pc += 3;
+        return;
     }
+
+    if ((instr & 0xF0000000) == 0xC0000000) {
+        m_pc += 3;
+        return;
+    }
+
+    m_specialRegs[EXCCAUSE] = EXC_ILLEGAL;
+    m_exceptionPending = true;
 }
 
 void XtensaCPU::requestInterrupt(int irqNumber) {
-    if (irqNumber < 0 || irqNumber >= 32) return;
-    
-    const uint32_t irqMask = 1U << irqNumber;
-    
-    // Проверка глобального разрешения и маски INTENABLE
-    if (m_ps.intenable && (m_specialRegs[INTENABLE] & irqMask)) {
-        m_pendingIrq |= irqMask;
+    if (irqNumber >= 0 && irqNumber < 32) {
+        m_pendingIrq |= (1U << irqNumber);
     }
 }
 
 void XtensaCPU::handlePendingException() {
-    // Определение причины исключения
     uint32_t cause = m_specialRegs[EXCCAUSE];
-    
-    // Для прерываний: проверяем ожидающие IRQ
-    if (cause == 0 && m_pendingIrq) {
-        // Находим IRQ с highest priority (старший бит)
-        const int irq = 31 - __builtin_clz(m_pendingIrq);
-        cause = EXC_LEVEL1_INTERRUPT;
-        m_pendingIrq &= ~(1U << irq); // Сбрасываем флаг
-    }
-    
-    // Вход в режим исключения
-    enterExceptionMode(cause, 0x40000000); // База векторов для ESP32
+    enterExceptionMode(cause, 0);
     m_exceptionPending = false;
 }
 
-void XtensaCPU::enterExceptionMode(uint32_t cause, uint32_t vectorBase) {
-    // Сохранение контекста
-    m_specialRegs[EPC1] = m_pc;          // Адрес ошибочной инструкции
-    m_specialRegs[EXCSAVE1] = m_ps.raw(); // Сохранение PS
-    
-    // Настройка нового состояния
-    m_ps.excm = 1;                       // Режим исключения
-    m_ps.intlevel = 15;                  // Маскируем все прерывания
-    m_ps.intenable = 0;
-    
-    // Загрузка вектора прерывания
-    m_pc = getVectorAddress(cause);
-}
+void XtensaCPU::enterExceptionMode(uint32_t cause, uint32_t /*vectorBase*/) {
+    m_specialRegs[EPC1] = m_pc;
+    m_specialRegs[EXCSAVE1] = ps().raw();
 
-uint32_t XtensaCPU::getVectorAddress(uint32_t cause) const {
-    // ESP32 использует фиксированные векторы:
-    // 0x40000000 + (cause * 0x100)
-    return 0x40000000 + (cause << 8);
+    ps().excm = 1;
+    ps().intlevel = 15;
+    ps().intenable = 0;
+
+    if (cause == EXC_LEVEL1_INTERRUPT) {
+        m_pc = 0x40000700;
+    } else {
+        m_pc = 0x40000600;
+    }
 }

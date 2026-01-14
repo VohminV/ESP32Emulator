@@ -18,25 +18,33 @@ public:
         DRAM,      // Data RAM
         Flash,     // External QSPI Flash (XIP)
         ROM,       // Internal Boot ROM
-        RTC_FAST,  // RTC Fast Memory (accessible by main CPU)
-        RTC_SLOW,  // RTC Slow Memory (for ULP coprocessor)
+        RTC_FAST,  // RTC Fast Memory
+        RTC_SLOW,  // RTC Slow Memory
         Peripheral // Memory-mapped I/O registers
     };
 
-    // Тип для callback-функций периферии
     using PeripheralCallback = std::function<uint32_t(XtensaCPU*, uint32_t addr, uint32_t value, bool isWrite)>;
 
     MemoryMap();
-    
-    // === Методы для работы с памятью ===
+
+    // Harvard interface
     uint32_t readInstruction(uint32_t address);
     uint32_t readData(uint32_t address);
     void writeData(uint32_t address, uint32_t value);
 
+    // Firmware loading
     void loadFirmware(const std::string& filePath);
+    void loadEspImage(const std::string& path); 
+
+    // Peripheral registration
     void registerPeripheralHandler(uint32_t baseAddress, size_t size, PeripheralCallback callback);
 
+    // Entry point for ESP32 image
+    uint32_t getEntryPoint() const { return m_entryPoint; } // ← ЗАКРЫВАЮЩАЯ СКОБКА ДОБАВЛЕНА
+
 private:
+    uint32_t m_entryPoint = 0x400D0000;
+
     struct MemoryRegion {
         uint32_t baseAddress;
         size_t size;

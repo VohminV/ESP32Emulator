@@ -32,6 +32,7 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
     qt_add_executable(ESP32Emulator
         MANUAL_FINALIZATION
         ${PROJECT_SOURCES}
+        mainwindow.ui
     )
 else()
     add_executable(ESP32Emulator
