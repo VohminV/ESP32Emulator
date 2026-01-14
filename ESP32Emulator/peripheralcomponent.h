@@ -32,6 +32,7 @@ public:
     uint32_t getBaseAddress() const { return m_baseAddress; }
     size_t getSize() const { return m_size; }
 
+	virtual ~PeripheralComponent() = default;
 protected:
     const uint32_t m_baseAddress;
     const size_t m_size;

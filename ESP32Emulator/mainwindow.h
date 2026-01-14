@@ -60,11 +60,11 @@ private slots:
 
 private:
     Ui::MainWindow *ui;
-
+	
     // Поток для WorkerObject
     QThread m_workerThread;
     WorkerObject *m_workerObject;
-
+	QString m_firmwarePath;
     // Модель для дерева проекта
     QFileSystemModel *m_projectModel;
 

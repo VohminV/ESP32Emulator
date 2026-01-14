@@ -25,6 +25,9 @@ set(PROJECT_SOURCES
     firmwareloader.cpp
     peripheralcomponent.cpp
     cpphighlighter.cpp
+	dportperipheral.cpp
+	frc1timer.cpp
+	uartperipheral.cpp
 )
 
 # --- Создаем исполняемый файл ---

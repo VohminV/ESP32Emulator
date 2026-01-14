@@ -69,41 +69,61 @@ void MemoryMap::addMemoryRegion(uint32_t baseAddress, size_t size, MemoryType ty
 }
 
 void MemoryMap::loadEspImage(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
+    // === ШАГ 1: Загружаем ВЕСЬ файл в m_flashImage ===
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
         throw std::runtime_error("Cannot open image: " + path);
     }
 
-    EspImageHeader hdr;
-    file.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
-    if (hdr.magic != 0xE9) {
+    std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    m_flashImage.resize(size);
+    if (!file.read(reinterpret_cast<char*>(m_flashImage.data()), size)) {
+        throw std::runtime_error("Failed to read image data");
+    }
+
+    // === ШАГ 2: Парсим заголовок из m_flashImage ===
+    if (size < sizeof(EspImageHeader)) {
+        throw std::runtime_error("Image too small");
+    }
+
+    EspImageHeader* hdr = reinterpret_cast<EspImageHeader*>(m_flashImage.data());
+    if (hdr->magic != 0xE9) {
         throw std::runtime_error("Invalid ESP image magic");
     }
 
-    std::cout << "ESP Image: " << (int)hdr.segments << " segments, entry=0x"
-              << std::hex << hdr.entry_addr << std::dec << "\n";
+    m_entryPoint = hdr->entry_addr;
 
-    // Загружаем каждый сегмент
-    for (int i = 0; i < hdr.segments; ++i) {
-        SegmentHeader seg;
-        file.read(reinterpret_cast<char*>(&seg), sizeof(seg));
-        if (seg.size == 0) continue;
+    std::cout << "ESP Image: " << (int)hdr->segments << " segments, entry=0x"
+              << std::hex << m_entryPoint << std::dec << "\n";
 
-        std::vector<uint8_t> data(seg.size);
-        file.read(reinterpret_cast<char*>(data.data()), seg.size);
+    // === ШАГ 3: Парсим сегменты и копируем их в RAM ===
+    size_t offset = sizeof(EspImageHeader);
+    for (int i = 0; i < hdr->segments; ++i) {
+        if (offset + sizeof(SegmentHeader) > m_flashImage.size()) {
+            throw std::runtime_error("Truncated image");
+        }
+
+        SegmentHeader* seg = reinterpret_cast<SegmentHeader*>(m_flashImage.data() + offset);
+        offset += sizeof(SegmentHeader);
+
+        if (seg->size == 0) continue;
+        if (offset + seg->size > m_flashImage.size()) {
+            throw std::runtime_error("Segment overflows image");
+        }
 
         std::cout << "  Segment " << i << ": "
-                  << "load_addr=0x" << std::hex << seg.load_addr
-                  << ", size=" << std::dec << seg.size << " bytes\n";
+                  << "load_addr=0x" << std::hex << seg->load_addr
+                  << ", size=" << std::dec << seg->size << " bytes\n";
 
-        // Пишем данные по целевому адресу в память
-        for (size_t j = 0; j < seg.size; ++j) {
-            writeData(seg.load_addr + j, data[j]);
+        // Копируем данные сегмента в RAM (DRAM/DROM)
+        for (size_t j = 0; j < seg->size; ++j) {
+            writeData(seg->load_addr + j, m_flashImage[offset + j]);
         }
-    }
 
-    // Сохраняем точку входа для EmulatorCore
-    m_entryPoint = hdr.entry_addr;
+        offset += seg->size;
+    }
 }
 
 void MemoryMap::loadFirmware(const std::string& filePath) {
@@ -146,31 +166,39 @@ void MemoryMap::registerPeripheralHandler(uint32_t baseAddress, size_t size, Per
 
 // --- Harvard-архитектура ---
 
-uint32_t MemoryMap::readInstruction(uint32_t address) {
-    auto* region = findMemoryRegion(address);
-    if (!region) {
-        throw std::runtime_error("Instruction fetch from unmapped address: 0x" + std::to_string(address));
+uint32_t MemoryMap::readInstruction(uint32_t addr) {
+    // IROM0: 0x400D0000–0x40400000 → отображается во flash (XIP)
+    if (addr >= 0x400D0000 && addr < 0x40400000) {
+        size_t offset = addr - 0x400D0000;
+        if (offset + 3 < m_flashImage.size()) {
+            // Little-endian: ESP32 — LE
+            return (static_cast<uint32_t>(m_flashImage[offset + 3]) << 24) |
+                   (static_cast<uint32_t>(m_flashImage[offset + 2]) << 16) |
+                   (static_cast<uint32_t>(m_flashImage[offset + 1]) << 8)  |
+                   (static_cast<uint32_t>(m_flashImage[offset + 0]));
+        }
+        throw std::runtime_error("Instruction fetch out of flash bounds");
     }
 
-    // Только эти типы могут содержать исполняемый код
-    if (region->type != MemoryType::IRAM &&
-        region->type != MemoryType::ROM &&
-        region->type != MemoryType::Flash) {
-        throw std::runtime_error("Illegal instruction fetch from non-code region: 0x" + std::to_string(address));
+    // DROM0: 0x3F400000–0x3F800000 → тоже из flash, но как данные
+    if (addr >= 0x3F400000 && addr < 0x3F800000) {
+        size_t offset = addr - 0x3F400000;
+        if (offset + 3 < m_flashImage.size()) {
+            return (static_cast<uint32_t>(m_flashImage[offset + 3]) << 24) |
+                   (static_cast<uint32_t>(m_flashImage[offset + 2]) << 16) |
+                   (static_cast<uint32_t>(m_flashImage[offset + 1]) << 8)  |
+                   (static_cast<uint32_t>(m_flashImage[offset + 0]));
+        }
     }
 
-    if (region->type == MemoryType::Peripheral) {
-        return 0; // Не должно происходить
+    // ROM: 0x40000000–0x40070000
+    if (addr >= 0x40000000 && addr < 0x40070000) {
+        // TODO: добавить ROM-образ (минимум — заглушку)
+        return 0x00000000; // или выбросить исключение
     }
 
-    size_t offset = address - region->baseAddress;
-    if (offset + sizeof(uint32_t) > region->size) {
-        throw std::runtime_error("Instruction fetch out of bounds");
-    }
-
-    uint32_t value;
-    std::memcpy(&value, region->data.get() + offset, sizeof(value));
-    return value;
+    // По умолчанию — читаем из DRAM как данные
+    return readData(addr);
 }
 
 uint32_t MemoryMap::readData(uint32_t address) {

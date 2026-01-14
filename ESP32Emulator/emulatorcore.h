@@ -24,7 +24,7 @@ class EmulatorCore {
 public:
     EmulatorCore();
     ~EmulatorCore();
-
+	void startAppCpu(); 
     /**
      * @brief Загружает прошивку в XIP-регион внешней флеш-памяти (0x400C2000).
      * После загрузки PRO_CPU устанавливается на точку входа приложения (0x400D0000).
@@ -73,6 +73,7 @@ public:
 	bool compileProject(const std::filesystem::path& projectPath);
     std::string getEspIdfPath() const;
     void setEspIdfPath(const std::string& path);
+	bool isFirmwareLoaded() const { return m_firmwareEntryPoint != 0x400D0000 || m_memoryMap->isImageLoaded(); }
 private:
 	uint32_t m_firmwareEntryPoint = 0x400D0000;
     struct ScheduledEvent {

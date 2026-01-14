@@ -32,18 +32,35 @@ EmulatorCore::~EmulatorCore() {
 
 bool EmulatorCore::loadFirmware(const std::string& path) {
     try {
-        // Загружаем образ как ESP32-образ, а не как сырой бинарник
+        // Загружаем образ — MemoryMap сам:
+        // - читает весь .bin
+        // - парсит заголовок
+        // - копирует сегменты в RAM (включая .data)
+        // - оставляет .bss нулевой (RAM изначально нулевая)
         m_memoryMap->loadEspImage(path);
-        m_firmwareEntryPoint = m_memoryMap->getEntryPoint(); // нужно добавить геттер
 
-        // Устанавливаем PC PRO_CPU на настоящую точку входа!
+        // Получаем точку входа (уже реализовано вами)
+        m_firmwareEntryPoint = m_memoryMap->getEntryPoint();
+
+        // Устанавливаем PC PRO_CPU
         m_cpu0->setPC(m_firmwareEntryPoint);
+        // APP_CPU остаётся на 0 — запустится позже через DPORT
 
-        std::cout << "Firmware loaded. Starting at 0x" << std::hex << m_firmwareEntryPoint << std::dec << "\n";
+        std::cout << "Firmware loaded. Entry: 0x" << std::hex << m_firmwareEntryPoint << std::dec << "\n";
         return true;
     } catch (const std::exception& e) {
         std::cerr << "Firmware load error: " << e.what() << std::endl;
         return false;
+    }
+}
+
+void EmulatorCore::startAppCpu() {
+    if (m_cpu1->getPC() == 0) {
+        // Точка входа APP_CPU — обычно та же, что и у PRO_CPU,
+        // но в реальности она задаётся через ROM-код.
+        // Для MVP используем ту же точку входа.
+        m_cpu1->setPC(m_firmwareEntryPoint);
+        std::cout << "APP_CPU started at 0x" << std::hex << m_firmwareEntryPoint << std::dec << "\n";
     }
 }
 

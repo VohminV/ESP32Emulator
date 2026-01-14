@@ -40,7 +40,8 @@ public:
     void registerPeripheralHandler(uint32_t baseAddress, size_t size, PeripheralCallback callback);
 
     // Entry point for ESP32 image
-    uint32_t getEntryPoint() const { return m_entryPoint; } // ← ЗАКРЫВАЮЩАЯ СКОБКА ДОБАВЛЕНА
+    uint32_t getEntryPoint() const { return m_entryPoint; }
+	bool isImageLoaded() const { return !m_flashImage.empty(); }
 
 private:
     uint32_t m_entryPoint = 0x400D0000;
@@ -65,6 +66,7 @@ private:
     void addMemoryRegion(uint32_t baseAddress, size_t size, MemoryType type);
     MemoryRegion* findMemoryRegion(uint32_t address);
     PeripheralHandler* findPeripheralHandler(uint32_t address);
+	std::vector<uint8_t> m_flashImage;
 };
 
 #endif // MEMORYMAP_H

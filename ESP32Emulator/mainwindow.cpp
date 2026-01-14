@@ -175,17 +175,43 @@ void MainWindow::onTreeProjectDoubleClicked(const QModelIndex &index)
 {
     QString filePath = m_projectModel->filePath(index);
     QFileInfo fi(filePath);
+
     if (fi.isDir()) return;
 
-    QFile file(filePath);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-        return;
+    // === Обработка прошивок (.bin / .elf) ===
+    if (fi.suffix() == "bin" || fi.suffix() == "elf") {
+        m_firmwarePath = filePath;
+        appendLog("Прошивка выбрана: " + m_firmwarePath);
+        return; // Не открываем в редакторе
+    }
 
-    QTextEdit *editor = new QTextEdit();
-    editor->setText(file.readAll());
+    // === Открытие текстовых файлов в редакторе ===
+    // Проверяем, что файл не слишком большой и, скорее всего, текстовый
+    if (fi.size() > 10 * 1024 * 1024) { // >10 МБ — считаем бинарным
+        appendLog("Файл слишком большой для открытия в редакторе: " + fi.fileName());
+        return;
+    }
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        appendLog("Не удалось открыть файл: " + fi.fileName());
+        return;
+    }
+
+    QByteArray content = file.readAll();
     file.close();
 
-    // Применяем подсветку синтаксиса
+    // Быстрая проверка на бинарность (наличие нулевых байтов в начале)
+    if (content.size() > 0 && memchr(content.constData(), '\0', qMin(1024, content.size())) != nullptr) {
+        appendLog("Файл выглядит как бинарный: " + fi.fileName());
+        return;
+    }
+
+    // Открываем в редакторе
+    QTextEdit* editor = new QTextEdit();
+    editor->setPlainText(QString::fromUtf8(content));
+
+    // Подсветка синтаксиса
     new CppHighlighter(editor->document());
 
     ui->tabEditor->addTab(editor, fi.fileName());
@@ -193,7 +219,7 @@ void MainWindow::onTreeProjectDoubleClicked(const QModelIndex &index)
 
     m_openedFiles[editor] = filePath;
 
-    // Автосохранение при изменении текста
+    // Автосохранение
     connect(editor, &QTextEdit::textChanged, [this, editor]() {
         QString path = m_openedFiles.value(editor);
         if (path.isEmpty()) return;
@@ -439,7 +465,21 @@ MainWindow::~MainWindow()
 
 void MainWindow::on_actionStart_triggered()
 {
-    QMetaObject::invokeMethod(m_workerObject, "onStartRequested", Qt::QueuedConnection);
+    if (m_firmwarePath.isEmpty()) {
+        appendLog("❌ Сначала выберите .bin или .elf файл!");
+        return;
+    }
+    // Передаём путь
+    QMetaObject::invokeMethod(
+        m_workerObject, "setFirmwarePath",
+        Qt::QueuedConnection,
+        Q_ARG(QString, m_firmwarePath)
+    );
+    // Запускаем
+    QMetaObject::invokeMethod(
+        m_workerObject, "onStartRequested",
+        Qt::QueuedConnection
+    );
 }
 
 void MainWindow::on_actionStop_triggered()
